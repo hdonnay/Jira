@@ -3,8 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,9 +15,12 @@ import (
 var (
 	authStr     = flag.String("a", "", "`username:password` combination")
 	debugEnable = flag.Bool("D", false, "enable debug output")
+	noPlumber   = flag.Bool("p", false, "disable plumber integration and don't linger")
 
 	debug func(string, ...interface{}) = func(_ string, _ ...interface{}) {}
 )
+
+const jiraDateFmt = "2006-01-02T15:04:05.000-0700"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n\n", os.Args[0])
@@ -45,8 +48,8 @@ func main() {
 	sig := make(chan os.Signal)
 	signal.Notify(sig, os.Interrupt, os.Kill)
 	flag.Parse()
-	jURL := flag.Arg(0)
-	if jURL == "" {
+
+	if flag.NArg() == 0 {
 		log.Fatal("need to specify jira server")
 	}
 	if *debugEnable {
@@ -55,9 +58,15 @@ func main() {
 		}
 	}
 
+	jURL, err := url.Parse(flag.Arg(0))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// Ideally we'd use some OAuth2 stuff, but it requires server-side setup for some reason.
-	auth.User, auth.Pass, auth.Err = secretsOS(jURL)
+	auth.User, auth.Pass, auth.Err = secretsOS(jURL.Host)
 	if auth.Err != nil {
+		debug("OS secret error: %v", auth.Err)
 		auth.User, auth.Pass, auth.Err = secretsFile()
 	}
 	if *authStr != "" {
@@ -73,7 +82,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	j, err := jira.NewClient(nil, jURL)
+	j, err := jira.NewClient(nil, jURL.String())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return
@@ -84,8 +93,16 @@ func main() {
 		return
 	}
 
-	ui := &UI{}
-	ui.start("", j)
+	ui, err := New(strings.TrimSuffix(jURL.Host, ".atlassian.net"), j)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if flag.NArg() < 2 {
+		ui.look("my-issues")
+	} else {
+		ui.look(strings.Join(flag.Args()[1:], " "))
+	}
+	go ui.plumber()
 
 	select {
 	case <-ui.exited:
@@ -93,19 +110,8 @@ func main() {
 	}
 }
 
-type comments struct {
-	Comments []jira.Comment `json:"comments"`
-}
-
-func (cs *comments) format(w io.Writer) {
-	for _, c := range cs.Comments {
-		debug("visibility: %#v\n", c.Visibility)
-		fmt.Fprintf(w, "\nComment by %s (%s)\n", c.Author.Name, c.Updated)
-		fmt.Fprintf(w, "\n\t%s\n", wrap(c.Body, "\t"))
-	}
-}
-
 func wrap(t, prefix string) string {
+	raw := false
 	out := ""
 	t = strings.TrimSpace(strings.Replace(t, "\r\n", "\n", -1))
 	max := 100
@@ -114,14 +120,22 @@ func wrap(t, prefix string) string {
 		if i > 0 {
 			out += "\n" + prefix
 		}
+		// try to handle code blocks nicely
+		if strings.HasPrefix(line, "{code}") || strings.HasSuffix(line, "{code}\n") {
+			raw = !raw
+		}
+		if raw {
+			out += line
+			continue
+		}
 		s := line
 		for len(s) > max {
 			i := strings.LastIndex(s[:max], " ")
 			if i < 0 {
 				i = max - 1
 			}
-			i++
 			out += s[:i] + "\n" + prefix
+			i++ // skip the space
 			s = s[i:]
 		}
 		out += s

@@ -2,9 +2,7 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
-	"io"
 	"log"
 	"path"
 	"regexp"
@@ -19,10 +17,15 @@ import (
 type win struct {
 	*acme.Win
 	Title string
-	Issue bool
-
+	// All windows should have put/get
 	reload func(*win)
 	put    func(*win)
+
+	// If an issue window, all these should exist
+	Issue      bool
+	tr         map[string]string
+	issueState string
+	headers    *headers
 }
 
 func (w *win) Clear() {
@@ -92,16 +95,16 @@ func (w *win) loop(ui *UI) {
 				ui.createIssue()
 				continue
 			case "Search":
-				// launch a search window
+				// launch a search window, or tell the search window to re-scan its query line
 				ui.err("Asked to Search, but I'm too dumb D:\n")
 				continue
-			case "Advance":
-				if !w.Issue {
-					ui.err("Can't Advance something other than a ticket.\n")
+			}
+			if w.Issue {
+				if id, ok := w.tr[cmd]; ok {
+					debug("transition: %q %q\n", cmd, id)
+					ui.transitionIssue(w, id)
 					continue
 				}
-				ui.err("Asked to Advance, but I'm too dumb D:\n")
-				continue
 			}
 			if strings.HasPrefix(cmd, "Search") {
 				query := strings.TrimSpace(cmd[6:])
@@ -128,6 +131,24 @@ func (w *win) loop(ui *UI) {
 	}
 }
 
+func (w *win) comment() string {
+	w.Addr(`#0`)
+	w.Addr(`/^\n/,/^\nReported by/`)
+	q0, q1, err := w.ReadAddr()
+	if err != nil {
+		log.Println(err)
+		return ""
+	}
+	q1 -= len("\nReported by")
+	w.Addr(`#%d,#%d`, q0, q1)
+	b, err := w.ReadAll("xdata")
+	if err != nil {
+		log.Println(err)
+		return ""
+	}
+	return strings.TrimSpace(string(b)) + "\n"
+}
+
 type UI struct {
 	sync.Mutex
 	win    map[string]*win
@@ -152,12 +173,10 @@ func (u *UI) err(s string) {
 	w.Ctl("show")
 }
 
-func (u *UI) start(prefix string, j *jira.Client) {
-	if prefix == "" {
-		prefix = "/jira/"
-	}
+func New(prefix string, j *jira.Client) (*UI, error) {
+	prefix = path.Join("/jira", prefix)
+	u := &UI{}
 
-	u.Lock()
 	if u.win == nil {
 		u.win = make(map[string]*win)
 	}
@@ -168,9 +187,8 @@ func (u *UI) start(prefix string, j *jira.Client) {
 
 	l, _, err := j.Project.GetList()
 	if err != nil {
-		log.Println(err)
 		close(u.exited)
-		return
+		return nil, err
 	}
 
 	var r []string
@@ -180,13 +198,7 @@ func (u *UI) start(prefix string, j *jira.Client) {
 
 	u.j = j
 	u.projRe = regexp.MustCompile("^(" + strings.Join(r, "|") + ")-[0-9]+")
-	u.Unlock()
-
-	if flag.NArg() < 2 {
-		u.look("my-issues")
-		return
-	}
-	u.look(strings.Join(flag.Args()[1:], " "))
+	return u, nil
 }
 
 func (u *UI) new(title string) *win {
@@ -202,6 +214,8 @@ func (u *UI) new(title string) *win {
 	debug("spawning: %q\n", title)
 	w.Title = title
 	w.Name(path.Join(u.prefix, title))
+	w.Ctl("mark")
+	w.Ctl("clean")
 	u.win[title] = w
 	go w.loop(u)
 	return w
@@ -226,14 +240,14 @@ func (u *UI) look(title string) bool {
 	title = strings.TrimPrefix(title, u.prefix)
 	debug("looking: %q\n", title)
 	switch title {
-	case "my-issues", "mine", "Mine":
+	case "my-issues", "mine", "Mine", "", "/":
 		if w := u.show("my-issues"); w == nil {
 			w = u.new("my-issues")
 			if w == nil {
 				return false
 			}
 			w.Ctl("cleartag")
-			w.Fprintf("tag", " New Get Search ")
+			w.Fprintf("tag", " Get New Search ")
 			w.reload = u.fetchMine
 			w.reload(w)
 		}
@@ -247,9 +261,9 @@ func (u *UI) look(title string) bool {
 			w = u.new(title)
 
 			w.Ctl("cleartag")
-			w.Fprintf("tag", " New Get Search Put Advance ")
-			w.reload = u.fetchIssue(title)
-			w.put = u.putIssue(title)
+			w.Fprintf("tag", issueTag)
+			w.reload = u.fetchIssue
+			w.put = u.putIssue
 			w.Issue = true
 			w.reload(w)
 		}
@@ -285,103 +299,21 @@ func (u *UI) fetchMine(w *win) {
 	w.Ctl("show")
 }
 
-func (u *UI) fetchIssue(id string) func(*win) {
-	return func(w *win) {
-		i, _, err := u.j.Issue.Get(id)
-		if err != nil {
-			u.err(err.Error())
-			w.Ctl("delete")
-			return
-		}
-		req, err := u.j.NewRequest("GET", fmt.Sprintf("/rest/api/2/issue/%s/comment", i.ID), nil)
-		if err != nil {
-			u.err(err.Error())
-			w.Ctl("delete")
-			return
-		}
-		comment := comments{}
-		if _, err := u.j.Do(req, &comment); err != nil {
-			u.err(err.Error())
-			w.Ctl("delete")
-			return
-		}
-
-		buf := &bytes.Buffer{}
-		u.issueHeader(buf, i)
-		fmt.Fprintf(buf, "\nReported by %s (%s)\n", i.Fields.Reporter.Name, i.Fields.Created)
-		fmt.Fprintf(buf, "\n\t%s\n", wrap(i.Fields.Description, "\t"))
-		comment.format(buf)
-
-		w.Clear()
-		w.Write("data", buf.Bytes())
-		w.Ctl("clean")
-		w.Addr("0")
-		w.Ctl("dot=addr")
-		w.Ctl("show")
-	}
-}
-
-func (u *UI) putIssue(id string) func(*win) {
-	return func(w *win) {
-		w.Addr(`#0`)
-		w.Addr(`/^\n/,/^\nReported by/`)
-		q0, q1, err := w.ReadAddr()
-		if err != nil {
-			log.Println(err)
-			return
-		}
-		q1 -= len("\nReported by")
-		w.Addr(`#%d,#%d`, q0, q1)
-		b, err := w.ReadAll("xdata")
-		if err != nil {
-			log.Println(err)
-			return
-		}
-		if len(b) == 0 {
-			return
-		}
-
-		c := jira.Comment{
-			Body: strings.TrimSpace(string(b)) + "\n",
-		}
-
-		debug("putIssue add comment:%q\n", c.Body)
-		if cr, res, err := u.j.Issue.AddComment(id, &c); err != nil {
-			debug("returned comment: %#v\n", cr)
-			debug("returned response: %#v\n", res)
-			log.Printf("error posting comment: %v\n", err)
-		}
-	}
-}
-
 func (u *UI) exit(title string) {
 	u.Lock()
 	defer u.Unlock()
 	delete(u.win, title)
-	if len(u.win) == 0 {
+	if *noPlumber && len(u.win) == 0 {
 		close(u.exited)
 	}
 }
 
-func (u *UI) createIssue() *win {
-	return nil
-}
-
-func (u *UI) issueHeader(w io.Writer, i *jira.Issue) {
-	fmt.Fprintf(w, "Title: %s\n", i.Fields.Summary)
-	fmt.Fprintf(w, "Type: %s\n", i.Fields.Type.Name)
-	fmt.Fprintf(w, "Status: %q\n", i.Fields.Status.Name)
-	fmt.Fprintf(w, "Assignee: %s\n", i.Fields.Assignee.Name)
-	fmt.Fprintf(w, "Components:")
-	for _, c := range i.Fields.Components {
-		if strings.Contains(c.Name, " ") {
-			fmt.Fprintf(w, " %q", c.Name)
-		} else {
-			fmt.Fprintf(w, " %s", c.Name)
-		}
+func (u *UI) leave() {
+	u.Lock()
+	defer u.Unlock()
+	for title, w := range u.win {
+		delete(u.win, title)
+		w.Del(true)
 	}
-	earl := u.j.GetBaseURL()
-	br, _ := (&earl).Parse("/browse/" + i.Key)
-	fmt.Fprintf(w, "\nURL: %s\n", br.String())
-	fmt.Fprint(w, "\n\n")
+	close(u.exited)
 }
