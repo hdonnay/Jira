@@ -103,6 +103,7 @@ func (w *win) loop(ui *UI) {
 				if id, ok := w.tr[cmd]; ok {
 					debug("transition: %q %q\n", cmd, id)
 					ui.transitionIssue(w, id)
+					w.Reload()
 					continue
 				}
 			}
@@ -146,7 +147,11 @@ func (w *win) comment() string {
 		log.Println(err)
 		return ""
 	}
-	return strings.TrimSpace(string(b)) + "\n"
+	s := strings.TrimSpace(string(b))
+	if s != "" {
+		s += "\n"
+	}
+	return s
 }
 
 type UI struct {
@@ -303,7 +308,7 @@ func (u *UI) exit(title string) {
 	u.Lock()
 	defer u.Unlock()
 	delete(u.win, title)
-	if *noPlumber && len(u.win) == 0 {
+	if len(u.win) == 0 {
 		close(u.exited)
 	}
 }

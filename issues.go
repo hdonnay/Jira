@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ type headers struct {
 	Assignee   string
 	URL        string
 	Components []string
+	Labels     []string
 }
 
 func headersFromIssue(i *jira.Issue) *headers {
@@ -34,10 +36,13 @@ func headersFromIssue(i *jira.Issue) *headers {
 		Status:   i.Fields.Status.Name,
 		Assignee: i.Fields.Assignee.Name,
 		URL:      br.String(),
+		Labels:   i.Fields.Labels,
 	}
 	for _, c := range i.Fields.Components {
 		r.Components = append(r.Components, c.Name)
 	}
+	sort.Strings(r.Components)
+	sort.Strings(r.Labels)
 	return &r
 }
 
@@ -60,8 +65,83 @@ func (h *headers) WriteTo(w io.Writer) {
 		}
 	}
 	fmt.Fprintf(w, "\n")
+	fmt.Fprintf(w, "Labels:")
+	for _, l := range h.Labels {
+		if strings.Contains(l, " ") {
+			fmt.Fprintf(w, " %q", l)
+		} else {
+			fmt.Fprintf(w, " %s", l)
+		}
+	}
+	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "URL: %s\n", h.URL)
 	fmt.Fprint(w, "\n\n")
+}
+
+func (w *win) diff() *issueUpdate {
+	line := `/^%s: /+-`
+	u := &issueUpdate{}
+	added := false
+	debug("diff against: %q", w.headers)
+
+	w.Addr(line, "Summary")
+	b, err := w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		s := string(bytes.TrimSpace(b[len("Summary: "):]))
+		if s != w.headers.Summary {
+			debug("summary set: %q", s)
+			added = true
+			u.Summary = []issueOp{{Set: s}}
+		}
+	}
+
+	w.Addr(line, "Assignee")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		s := string(bytes.TrimSpace(b[len("Assignee: "):]))
+		if s != w.headers.Assignee {
+			debug("assignee set: %q", s)
+			added = true
+			u.Assignee = []issueOp{{Set: s}}
+		}
+	}
+
+	w.Addr(line, "Components")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		b = bytes.TrimSpace(b[len("Components:"):])
+		add, rem := diffStrings(unquote(b), w.headers.Components)
+		debug("components add/remove: %q %q", add, rem)
+		for _, x := range add {
+			added = true
+			u.Components = append(u.Components, issueOp{Add: x})
+		}
+		for _, x := range rem {
+			added = true
+			u.Components = append(u.Components, issueOp{Remove: x})
+		}
+	}
+
+	w.Addr(line, "Labels")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		b = bytes.TrimSpace(b[len("Labels:"):])
+		add, rem := diffStrings(unquote(b), w.headers.Labels)
+		debug("label add/remove: %q %q", add, rem)
+		for _, x := range add {
+			added = true
+			u.Labels = append(u.Labels, issueOp{Add: x})
+		}
+		for _, x := range rem {
+			added = true
+			u.Labels = append(u.Labels, issueOp{Remove: x})
+		}
+	}
+
+	if !added {
+		return nil
+	}
+	return u
 }
 
 func (u *UI) createIssue() *win {
@@ -130,25 +210,62 @@ func (u *UI) fetchIssue(w *win) {
 }
 
 func (u *UI) putIssue(w *win) {
+	// check headers
+	up := struct {
+		Update *issueUpdate `json:"update,omitempty"`
+	}{
+		Update: w.diff(),
+	}
 	c := w.comment()
-	if len(c) == 0 {
-		return
+	if len(c) != 0 {
+		if up.Update == nil {
+			up.Update = &issueUpdate{}
+		}
+		up.Update.Comment = []issueOp{{Add: map[string]string{"body": c}}}
 	}
 
-	debug("putIssue add comment: %q\n", c)
-	if cr, res, err := u.j.Issue.AddComment(w.Title, &jira.Comment{Body: c}); err != nil {
-		debug("returned comment: %#v\n", cr)
-		debug("returned response: %#v\n", res)
-		u.err(fmt.Sprintf("error posting comment: %v\n", err))
+	if up.Update != nil {
+		debug("putIssue update: %v", up.Update)
+		req, err := u.j.NewRequest("PUT", fmt.Sprintf("/rest/api/2/issue/%s", w.Title), up)
+		if err != nil {
+			u.err(err.Error())
+			return
+		}
+
+		if res, err := u.j.Do(req, nil); err != nil {
+			debug("returned response: %#v\n", res)
+			u.err(fmt.Sprintf("error doing transition: %v\n", err))
+		}
+	} else {
+		debug("putIssue: doing nothing")
 	}
 }
 
 func (u *UI) transitionIssue(w *win, id string) {
+	t := &transitionPut{
+		Update: w.diff(),
+	}
+	t.Transition.ID = id
+
 	c := w.comment()
-	// should also diff the headers
-	// make some crazy struct
+	if len(c) != 0 {
+		if t.Update == nil {
+			t.Update = &issueUpdate{}
+		}
+		t.Update.Comment = []issueOp{{Add: map[string]string{"body": c}}}
+	}
+
 	// do a jira
-	_ = c
+	req, err := u.j.NewRequest("POST", fmt.Sprintf("/rest/api/2/issue/%s/transitions", w.Title), t)
+	if err != nil {
+		u.err(err.Error())
+		return
+	}
+
+	if res, err := u.j.Do(req, nil); err != nil {
+		debug("returned response: %#v\n", res)
+		u.err(fmt.Sprintf("error doing transition: %v\n", err))
+	}
 }
 
 type comments struct {
@@ -207,4 +324,26 @@ func (tr *transitions) set() map[string]string {
 		r[strings.Replace(strings.Title(t.Name), " ", "", -1)] = t.ID
 	}
 	return r
+}
+
+type transitionPut struct {
+	Update     *issueUpdate `json:"update,omitempty"`
+	Transition struct {
+		ID string `json:"id"`
+	} `json:"transition"`
+}
+
+type issueUpdate struct {
+	Summary    []issueOp `json:"summary,omitempty"`
+	Comment    []issueOp `json:"comment,omitempty"`
+	Assignee   []issueOp `json:"assignee,omitempty"`
+	Components []issueOp `json:"components,omitempty"`
+	Labels     []issueOp `json:"labels,omitempty"`
+}
+
+type issueOp struct {
+	Set    interface{} `json:"set,omitempty"`
+	Add    interface{} `json:"add,omitempty"`
+	Remove interface{} `json:"remove,omitempty"`
+	Edit   interface{} `json:"edit,omitempty"`
 }
