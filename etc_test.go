@@ -19,6 +19,10 @@ var (
 			In:   []byte("complex \"test like\" this\\\""),
 			Want: []string{"complex", "test like", "this\""},
 		},
+		{
+			In:   []byte(`'don''t split'`),
+			Want: []string{`don't split`},
+		},
 	}
 	strs = []struct {
 		Old, New       []string

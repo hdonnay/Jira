@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"path"
 	"regexp"
@@ -10,6 +9,12 @@ import (
 
 	"9fans.net/go/acme"
 	jira "github.com/andygrunwald/go-jira"
+)
+
+const (
+	addrdelim = "/[ \t\\n<>()\\[\\]\"']/"
+	issueFmt  = "%s\t%s\t%s\n\t%s\n"
+	myIssues  = `assignee = currentUser() AND resolution = Unresolved order by updated desc`
 )
 
 type win struct {
@@ -24,6 +29,8 @@ type win struct {
 	tr         map[string]string
 	issueState string
 	headers    *headers
+
+	Search bool
 }
 
 func (w *win) Clear() {
@@ -42,8 +49,6 @@ func (w *win) Put() {
 		w.put(w)
 	}
 }
-
-const addrdelim = "/[ \t\\n<>()\\[\\]\"']/"
 
 // This is modeled on a similar set of functions that seem to be in every acme program.
 func (w *win) expand(e *acme.Event) {
@@ -92,10 +97,16 @@ func (w *win) loop(ui *UI) {
 			case "New":
 				ui.issueTemplate()
 				continue
-			case "Search":
-				// launch a search window, or tell the search window to re-scan its query line
-				ui.err("Asked to Search, but I'm too dumb D:\n")
-				continue
+			case "Clear":
+				if w.Search {
+					w.Ctl("nomark")
+					w.Addr("2,")
+					w.Write("data", []byte{})
+					w.Ctl("mark")
+					w.Ctl("clean")
+					eol(w, 1)
+					continue
+				}
 			}
 			if w.Issue {
 				if id, ok := w.tr[cmd]; ok {
@@ -106,9 +117,16 @@ func (w *win) loop(ui *UI) {
 				}
 			}
 			if strings.HasPrefix(cmd, "Search") {
-				query := strings.TrimSpace(cmd[6:])
-				// do a search and return results
-				_ = query
+				ui.look("search")
+				w := ui.show("search")
+				if len(cmd) != 6 {
+					w.Ctl("nomark")
+					w.Addr(`1`)
+					w.Fprintf("data", cmd+"\n")
+					w.Ctl("mark")
+				}
+				w.Reload()
+				continue
 			}
 		case 'l', 'L': // button 3
 			debug("event: %x %q %q\n", e.Flag, e.C2, string(e.Text))
@@ -302,8 +320,22 @@ func (u *UI) look(title string) bool {
 			}
 		}
 		return true
-	case "Projects", "Issues", "Search":
-		u.err(fmt.Sprintf("%q not implemented yet\n", title))
+	case "Search", "search":
+		if w := u.show("search"); w == nil {
+			w = u.new("search")
+			if w == nil {
+				return false
+			}
+			w.Ctl("cleartag")
+			w.Fprintf("tag", " Clear ")
+			w.Fprintf("data", "Search %s\n", myIssues)
+			eol(w, 1)
+			w.Ctl("mark")
+			w.Ctl("clean")
+			w.Search = true
+			w.reload = u.search
+		}
+		return true
 	}
 	if u.projRe.MatchString(title) {
 		if w := u.show(title); w == nil {
@@ -323,7 +355,7 @@ func (u *UI) look(title string) bool {
 }
 
 func (u *UI) fetchMine(w *win) {
-	l, _, err := u.j.Issue.Search(`assignee = currentUser() AND resolution = Unresolved order by updated DESC`, nil)
+	l, _, err := u.j.Issue.Search(myIssues, nil)
 	if err != nil {
 		u.err(err.Error())
 		return
@@ -331,7 +363,7 @@ func (u *UI) fetchMine(w *win) {
 
 	w.Clear()
 	for _, i := range l {
-		w.Fprintf("data", "%s\t%s\t%s\n"+"\t%s\n",
+		w.Fprintf("data", issueFmt,
 			i.Key,
 			i.Fields.Type.Name,
 			i.Fields.Status.Name,

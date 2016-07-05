@@ -138,7 +138,7 @@ func (h *headers) WriteTo(w io.Writer) {
 	}
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "URL: %s\n", h.URL)
-	fmt.Fprint(w, "\n\n")
+	fmt.Fprintln(w)
 }
 
 func (w *win) diff() *issueUpdate {
@@ -339,7 +339,7 @@ func (u *UI) fetchIssue(w *win) {
 	if err != nil {
 		log.Println(err)
 	}
-	fmt.Fprintf(buf, "\nReported by %s (%s)\n", i.Fields.Reporter.Name, t.Format(time.Stamp))
+	fmt.Fprintf(buf, "Reported by %s (%s)\n", i.Fields.Reporter.Name, t.Format(time.Stamp))
 	fmt.Fprintf(buf, "\n\t%s\n", wrap(i.Fields.Description, "\t"))
 	comment.format(buf)
 

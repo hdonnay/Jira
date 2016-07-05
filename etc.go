@@ -44,11 +44,25 @@ func unquote(b []byte) []string {
 		switch {
 		case ch == '\\':
 			ch, _, err = r.ReadRune()
+			if err != nil {
+				break
+			}
 			if ch != '"' {
 				s[i] += `\`
 			}
 			s[i] += string(ch)
 		case ch == '"':
+			in = !in
+		case ch == '\'':
+			ch, _, err = r.ReadRune()
+			if err != nil {
+				break
+			}
+			if ch == '\'' {
+				s[i] += `'`
+				break
+			}
+			s[i] += string(ch)
 			in = !in
 		case unicode.IsSpace(ch):
 			if in {
@@ -65,4 +79,12 @@ func unquote(b []byte) []string {
 		log.Println(err)
 	}
 	return s
+}
+
+func eol(w *win, l int) {
+	w.Addr("%d", l)
+	_, q1, _ := w.ReadAddr()
+	q1--
+	w.Addr("#%d", q1)
+	w.Ctl("dot=addr")
 }

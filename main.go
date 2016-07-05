@@ -63,6 +63,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	debug("hello")
 	// Ideally we'd use some OAuth2 stuff, but it requires server-side setup for some reason.
 	auth.User, auth.Pass, auth.Err = secretsOS(jURL.Host)
 	if auth.Err != nil {
@@ -108,6 +109,7 @@ func main() {
 	case <-ui.exited:
 	case <-sig:
 	}
+	debug("bye")
 }
 
 func wrap(t, prefix string) string {
