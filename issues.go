@@ -14,7 +14,17 @@ import (
 )
 
 const (
-	issueTag = ` Undo Get Put |fmt `
+	issueTag  = ` Undo Get Put |fmt `
+	issueTmpl = `Summary: 
+Project: [%s]
+Type: [%s]
+Assignee: 
+Labels: 
+Components: 
+
+<Description goes here>
+`
+	pickLine = `/^%s: /+-`
 )
 
 type headers struct {
@@ -22,6 +32,7 @@ type headers struct {
 	Type       string
 	Status     string
 	Assignee   string
+	Project    string
 	URL        string
 	Components []string
 	Labels     []string
@@ -35,6 +46,7 @@ func headersFromIssue(i *jira.Issue) *headers {
 		Type:     i.Fields.Type.Name,
 		Status:   i.Fields.Status.Name,
 		Assignee: i.Fields.Assignee.Name,
+		Project:  i.Fields.Project.Name,
 		URL:      br.String(),
 		Labels:   i.Fields.Labels,
 	}
@@ -46,7 +58,58 @@ func headersFromIssue(i *jira.Issue) *headers {
 	return &r
 }
 
+func headersFromWindow(w *win) *headers {
+	var b []byte
+	var err error
+	h := headers{}
+
+	w.Addr(`#0`)
+	w.Addr(pickLine, "Summary")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		h.Summary = string(bytes.TrimSpace(b[len("Summary:"):]))
+	}
+	w.Addr(pickLine, "Project")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		h.Project = string(bytes.TrimSpace(b[len("Project:"):]))
+	}
+	w.Addr(pickLine, "Type")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		h.Type = string(bytes.TrimSpace(b[len("Type:"):]))
+	}
+	w.Addr(pickLine, "Status")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		h.Status = string(bytes.TrimSpace(b[len("Status:"):]))
+	}
+	w.Addr(pickLine, "Assignee")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		h.Assignee = string(bytes.TrimSpace(b[len("Assignee:"):]))
+	}
+	w.Addr(pickLine, "Components")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		h.Components = unquote(bytes.TrimSpace(b[len("Components:"):]))
+	}
+	w.Addr(pickLine, "Labels")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		h.Labels = unquote(bytes.TrimSpace(b[len("Labels:"):]))
+	}
+	w.Addr(pickLine, "URL")
+	b, err = w.ReadAll("xdata")
+	if err == nil && len(b) != 0 {
+		h.URL = string(bytes.TrimSpace(b[len("URL:"):]))
+	}
+
+	return &h
+}
+
 func (h *headers) WriteTo(w io.Writer) {
+	// We don't write out the project, because that's encoded in the issue key.
 	fmt.Fprintf(w, "Summary: %s\n", h.Summary)
 	fmt.Fprintf(w, "Type: %s\n", h.Type)
 	fmt.Fprintf(w, "Status: ")
@@ -79,73 +142,172 @@ func (h *headers) WriteTo(w io.Writer) {
 }
 
 func (w *win) diff() *issueUpdate {
-	line := `/^%s: /+-`
-	u := &issueUpdate{}
+	u := issueUpdate{}
 	added := false
 	debug("diff against: %q", w.headers)
 
-	w.Addr(line, "Summary")
-	b, err := w.ReadAll("xdata")
-	if err == nil && len(b) != 0 {
-		s := string(bytes.TrimSpace(b[len("Summary: "):]))
-		if s != w.headers.Summary {
-			debug("summary set: %q", s)
-			added = true
-			u.Summary = []issueOp{{Set: s}}
-		}
-	}
+	h := headersFromWindow(w)
 
-	w.Addr(line, "Assignee")
-	b, err = w.ReadAll("xdata")
-	if err == nil && len(b) != 0 {
-		s := string(bytes.TrimSpace(b[len("Assignee: "):]))
-		if s != w.headers.Assignee {
-			debug("assignee set: %q", s)
-			added = true
-			u.Assignee = []issueOp{{Set: s}}
-		}
+	if h.Summary != w.headers.Summary {
+		debug("summary set: %q", h.Summary)
+		added = true
+		u.Summary = []issueOp{{Set: h.Summary}}
 	}
-
-	w.Addr(line, "Components")
-	b, err = w.ReadAll("xdata")
-	if err == nil && len(b) != 0 {
-		b = bytes.TrimSpace(b[len("Components:"):])
-		add, rem := diffStrings(unquote(b), w.headers.Components)
-		debug("components add/remove: %q %q", add, rem)
-		for _, x := range add {
-			added = true
-			u.Components = append(u.Components, issueOp{Add: x})
-		}
-		for _, x := range rem {
-			added = true
-			u.Components = append(u.Components, issueOp{Remove: x})
-		}
+	if h.Assignee != w.headers.Assignee {
+		debug("assignee set: %q", h.Assignee)
+		added = true
+		u.Assignee = []issueOp{{Set: h.Assignee}}
 	}
-
-	w.Addr(line, "Labels")
-	b, err = w.ReadAll("xdata")
-	if err == nil && len(b) != 0 {
-		b = bytes.TrimSpace(b[len("Labels:"):])
-		add, rem := diffStrings(unquote(b), w.headers.Labels)
-		debug("label add/remove: %q %q", add, rem)
-		for _, x := range add {
-			added = true
-			u.Labels = append(u.Labels, issueOp{Add: x})
-		}
-		for _, x := range rem {
-			added = true
-			u.Labels = append(u.Labels, issueOp{Remove: x})
-		}
+	add, rem := diffStrings(h.Components, w.headers.Components)
+	debug("components add/remove: %q %q", add, rem)
+	for _, x := range add {
+		added = true
+		u.Components = append(u.Components, issueOp{Add: x})
+	}
+	for _, x := range rem {
+		added = true
+		u.Components = append(u.Components, issueOp{Remove: x})
+	}
+	add, rem = diffStrings(h.Labels, w.headers.Labels)
+	debug("label add/remove: %q %q", add, rem)
+	for _, x := range add {
+		added = true
+		u.Labels = append(u.Labels, issueOp{Add: x})
+	}
+	for _, x := range rem {
+		added = true
+		u.Labels = append(u.Labels, issueOp{Remove: x})
 	}
 
 	if !added {
 		return nil
 	}
-	return u
+	return &u
 }
 
-func (u *UI) createIssue() *win {
-	return nil
+func (u *UI) issueTemplate() *win {
+	w := u.new("new-issue")
+	w.Ctl("cleartag")
+	if err := w.Fprintf("tag", issueTag); err != nil {
+		u.err(err.Error())
+		return nil
+	}
+	w.put = u.createIssue
+	w.Issue = true
+
+	u.projMu.Lock()
+	var proj []string
+	for _, p := range u.proj {
+		proj = append(proj, p.Key)
+	}
+	u.projMu.Unlock()
+
+	u.typesMu.Lock()
+	var types []string
+	for n := range u.types {
+		types = append(types, n)
+	}
+	u.typesMu.Unlock()
+
+	err := w.Fprintf("data", issueTmpl,
+		strings.Join(proj, "|"),
+		strings.Join(types, "|"),
+	)
+	if err != nil {
+		u.err(err.Error())
+		return nil
+	}
+
+	return w
+}
+
+func (u *UI) createIssue(w *win) {
+	h := headersFromWindow(w)
+	switch {
+	case h.Summary == "":
+		u.err("blank summary")
+		return
+	case h.Project == "":
+		u.err("blank project")
+		return
+	case h.Type == "":
+		u.err("blank type")
+		return
+	case h.Assignee == "":
+		u.err("blank Assignee")
+		return
+	}
+
+	u.typesMu.Lock()
+	var tid string
+	if ty, ok := u.types[h.Type]; ok {
+		tid = ty.ID
+	}
+	u.typesMu.Unlock()
+	if tid == "" {
+		u.err("bad issue type")
+		return
+	}
+
+	u.projMu.Lock()
+	var pid string
+	ok := false
+	for _, pr := range u.proj {
+		if pr.Name == h.Project {
+			pid = pr.ID
+			ok = true
+			break
+		}
+	}
+	u.projMu.Unlock()
+	if !ok {
+		u.err("bad project name")
+		return
+	}
+
+	var cmp []*jira.Component
+	for _, c := range h.Components {
+		cmp = append(cmp, &jira.Component{Name: c})
+	}
+
+	w.Addr(`#0`)
+	w.Addr(`/^\n/,`)
+	b, err := w.ReadAll("xdata")
+	if err != nil {
+		u.err(err.Error())
+		return
+	}
+	desc := strings.TrimSpace(string(b))
+	if desc == "" {
+		u.err("empty description")
+		return
+	}
+	desc += "\n"
+
+	// do the jira
+	// change the window title
+	i := &jira.Issue{
+		Fields: &jira.IssueFields{
+			Description: desc,
+			Summary:     h.Summary,
+			Type:        jira.IssueType{ID: tid},
+			Project:     jira.Project{ID: pid},
+			Assignee:    &jira.User{Name: h.Assignee},
+			Labels:      h.Labels,
+			Components:  cmp,
+		},
+	}
+
+	ni, _, err := u.j.Issue.Create(i)
+	if err != nil {
+		u.err(err.Error())
+		return
+	}
+
+	u.rename(w.Title, ni.Key)
+	w.reload = u.fetchIssue
+	w.put = u.putIssue
+	w.reload(w)
 }
 
 func (u *UI) fetchIssue(w *win) {

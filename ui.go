@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"path"
 	"regexp"
 	"strings"
 	"sync"
-	"text/tabwriter"
 
 	"9fans.net/go/acme"
 	jira "github.com/andygrunwald/go-jira"
@@ -92,7 +90,7 @@ func (w *win) loop(ui *UI) {
 				w.Reload()
 				continue
 			case "New":
-				ui.createIssue()
+				ui.issueTemplate()
 				continue
 			case "Search":
 				// launch a search window, or tell the search window to re-scan its query line
@@ -158,10 +156,16 @@ type UI struct {
 	sync.Mutex
 	win    map[string]*win
 	exited chan struct{}
-	projRe *regexp.Regexp
 
 	j      *jira.Client
 	prefix string
+
+	types   map[string]*jira.IssueType
+	typesMu *sync.Mutex
+
+	proj   jira.ProjectList
+	projMu *sync.Mutex
+	projRe *regexp.Regexp
 }
 
 func (u *UI) err(s string) {
@@ -180,30 +184,64 @@ func (u *UI) err(s string) {
 
 func New(prefix string, j *jira.Client) (*UI, error) {
 	prefix = path.Join("/jira", prefix)
-	u := &UI{}
+	u := &UI{
+		j:      j,
+		prefix: prefix,
 
-	if u.win == nil {
-		u.win = make(map[string]*win)
-	}
-	if u.prefix == "" {
-		u.prefix = prefix
-	}
-	u.exited = make(chan struct{})
+		typesMu: &sync.Mutex{},
+		projMu:  &sync.Mutex{},
 
-	l, _, err := j.Project.GetList()
-	if err != nil {
-		close(u.exited)
-		return nil, err
+		types:  make(map[string]*jira.IssueType),
+		win:    make(map[string]*win),
+		exited: make(chan struct{}),
 	}
-
-	var r []string
-	for _, p := range *l {
-		r = append(r, "("+p.Key+")")
-	}
-
-	u.j = j
-	u.projRe = regexp.MustCompile("^(" + strings.Join(r, "|") + ")-[0-9]+")
+	u.updateCaches()
 	return u, nil
+}
+
+func (u *UI) updateCaches() {
+	// TODO(hank) figure out best time to refresh these
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		u.typesMu.Lock()
+		defer u.typesMu.Unlock()
+
+		req, err := u.j.NewRequest("GET", "/rest/api/2/issuetype", nil)
+		if err != nil {
+			u.err(err.Error())
+			return
+		}
+		var typesRes []jira.IssueType
+		if _, err := u.j.Do(req, &typesRes); err != nil {
+			u.err(err.Error())
+			return
+		}
+		for i, t := range typesRes {
+			u.types[t.Name] = &typesRes[i]
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		u.projMu.Lock()
+		defer u.projMu.Unlock()
+		l, _, err := u.j.Project.GetList()
+		if err != nil {
+			close(u.exited)
+			return
+		}
+		var r []string
+		for _, p := range *l {
+			r = append(r, "("+p.Key+")")
+		}
+		u.projRe = regexp.MustCompile("^(" + strings.Join(r, "|") + ")-[0-9]+")
+		u.proj = *l
+	}()
+
+	wg.Wait()
 }
 
 func (u *UI) new(title string) *win {
@@ -257,6 +295,13 @@ func (u *UI) look(title string) bool {
 			w.reload(w)
 		}
 		return true
+	case "new-issue":
+		if w := u.show("new-issue"); w == nil {
+			if w = u.issueTemplate(); w == nil {
+				return false
+			}
+		}
+		return true
 	case "Projects", "Issues", "Search":
 		u.err(fmt.Sprintf("%q not implemented yet\n", title))
 	}
@@ -284,20 +329,16 @@ func (u *UI) fetchMine(w *win) {
 		return
 	}
 
-	buf := &bytes.Buffer{}
-	wr := tabwriter.NewWriter(buf, 4, 4, 1, '\t', 0)
+	w.Clear()
 	for _, i := range l {
-		fmt.Fprintf(wr, "%s\t%s/%s\t%s\n",
+		w.Fprintf("data", "%s\t%s\t%s\n"+"\t%s\n",
 			i.Key,
 			i.Fields.Type.Name,
 			i.Fields.Status.Name,
 			i.Fields.Summary,
 		)
 	}
-	wr.Flush()
 
-	w.Clear()
-	w.Write("data", buf.Bytes())
 	w.Ctl("clean")
 	w.Addr("0")
 	w.Ctl("dot=addr")
@@ -311,6 +352,18 @@ func (u *UI) exit(title string) {
 	if len(u.win) == 0 {
 		close(u.exited)
 	}
+}
+
+func (u *UI) rename(old, new string) {
+	u.Lock()
+	defer u.Unlock()
+	w, ok := u.win[old]
+	if !ok {
+		return
+	}
+	delete(u.win, old)
+	u.win[new] = w
+	w.Title = new
 }
 
 func (u *UI) leave() {

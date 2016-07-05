@@ -2,9 +2,9 @@ Jira is an acme based client for jira.
 
 Write support is lightly tested, but updating issues works. Issue
 transitions haven't been tested.  It's aiming for rough feature parity
-with `github.com/rsc/github/issue`.
+with `rsc.io/github/issue`.
 
-Some code cribbed from `github.com/rsc/github/issue`.
+Some code cribbed from `rsc.io/github/issue`.
 
 Jira can be started from the plumber. An example rule:
 
