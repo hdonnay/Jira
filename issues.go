@@ -42,16 +42,20 @@ func headersFromIssue(i *jira.Issue) *headers {
 	u, _ := url.Parse(i.Self)
 	br, _ := u.Parse("/browse/" + i.Key)
 	r := headers{
-		Summary:  i.Fields.Summary,
-		Type:     i.Fields.Type.Name,
-		Status:   i.Fields.Status.Name,
-		Assignee: i.Fields.Assignee.Name,
-		Project:  i.Fields.Project.Name,
-		URL:      br.String(),
-		Labels:   i.Fields.Labels,
+		Summary: i.Fields.Summary,
+		Type:    i.Fields.Type.Name,
+		Project: i.Fields.Project.Name,
+		URL:     br.String(),
+		Labels:  i.Fields.Labels,
 	}
 	for _, c := range i.Fields.Components {
 		r.Components = append(r.Components, c.Name)
+	}
+	if i.Fields.Assignee != nil {
+		r.Assignee = i.Fields.Assignee.Name
+	}
+	if i.Fields.Status != nil {
+		r.Status = i.Fields.Status.Name
 	}
 	sort.Strings(r.Components)
 	sort.Strings(r.Labels)
@@ -156,7 +160,7 @@ func (w *win) diff() *issueUpdate {
 	if h.Assignee != w.headers.Assignee {
 		debug("assignee set: %q", h.Assignee)
 		added = true
-		u.Assignee = []issueOp{{Set: h.Assignee}}
+		u.Assignee = []issueOp{{Set: map[string]string{"name": h.Assignee}}}
 	}
 	add, rem := diffStrings(h.Components, w.headers.Components)
 	debug("components add/remove: %q %q", add, rem)
@@ -395,7 +399,10 @@ func (u *UI) putIssue(w *win) {
 		}
 
 		if res, err := u.j.Do(req, nil); err != nil {
-			debug("returned response: %#v\n", res)
+			buf := &bytes.Buffer{}
+			io.Copy(buf, res.Body)
+			res.Body.Close()
+			debug("returned response: %s\n", buf.String())
 			u.err(fmt.Sprintf("error doing transition: %v\n", err))
 		}
 	} else {
