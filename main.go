@@ -123,7 +123,7 @@ func wrap(t, prefix string) string {
 			out += "\n" + prefix
 		}
 		// try to handle code blocks nicely
-		if strings.HasPrefix(line, "{code}") || strings.HasSuffix(line, "{code}\n") {
+		if strings.HasPrefix(line, "{code") || strings.HasSuffix(line, "{code}\n") {
 			raw = !raw
 		}
 		if raw {
