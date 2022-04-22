@@ -1,21 +1,25 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 
 	jira "github.com/andygrunwald/go-jira"
+	"golang.org/x/net/publicsuffix"
 )
 
 var (
-	authStr     = flag.String("a", "", "`username:password` combination")
+	authStr     = flag.String("a", "", "`username:personal_access_token` combination")
 	debugEnable = flag.Bool("D", false, "enable debug output")
 	noPlumber   = flag.Bool("p", false, "disable plumber integration and don't linger")
+	wrapWidth   = flag.Int("w", 80, "set wrap width")
 
 	debug func(string, ...interface{}) = func(_ string, _ ...interface{}) {}
 )
@@ -30,7 +34,12 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "Credentials are looked for in a OS-specific secret store (linux only currently),\n")
 	fmt.Fprintf(os.Stderr, "then in ~/.jira-creds. The 'a' flag will override both. They're all expected to\n")
 	fmt.Fprintf(os.Stderr, "be in the same format.\n\n")
-	fmt.Fprintf(os.Stderr, "If a window name is supplied, it will be opened instead of \"my-issues\".\n\n")
+	fmt.Fprintf(os.Stderr, "If a window name is supplied, it will be opened instead of \"my-issues\".\n")
+	fmt.Fprintf(os.Stderr, "Some special names include:\n\n")
+	fmt.Fprintf(os.Stderr, "\t- my-issues\n")
+	fmt.Fprintf(os.Stderr, "\t- search\n")
+	fmt.Fprintf(os.Stderr, "\t- filters\n")
+	fmt.Fprintf(os.Stderr, "\n")
 }
 
 func init() {
@@ -40,13 +49,13 @@ func init() {
 
 func main() {
 	var auth struct {
+		Err  error
 		User string
 		Pass string
-		Err  error
 	}
 	var err error
-	sig := make(chan os.Signal)
-	signal.Notify(sig, os.Interrupt, os.Kill)
+	ctx, done := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+	defer done()
 	flag.Parse()
 
 	if flag.NArg() == 0 {
@@ -65,31 +74,32 @@ func main() {
 
 	debug("hello")
 	// Ideally we'd use some OAuth2 stuff, but it requires server-side setup for some reason.
-	auth.User, auth.Pass, auth.Err = secretsOS(jURL.Host)
+	auth.User, auth.Pass, auth.Err = secretsOS(ctx, jURL.Host)
 	if auth.Err != nil {
 		debug("OS secret error: %v", auth.Err)
 		auth.User, auth.Pass, auth.Err = secretsFile()
 	}
 	if *authStr != "" {
-		auth.Err = nil
-		upw := strings.SplitN(*authStr, ":", 2)
-		if len(upw) != 2 {
-			auth.Err = fmt.Errorf("unable to make sense of supplied username:password")
-		} else {
-			auth.User, auth.Pass = upw[0], upw[1]
+		var ok bool
+		auth.User, auth.Pass, ok = strings.Cut(*authStr, ":")
+		if !ok {
+			log.Fatal(fmt.Errorf("unable to make sense of supplied username:password"))
 		}
 	}
-	if auth.Err != nil {
-		log.Fatal(err)
-	}
 
-	j, err := jira.NewClient(nil, jURL.String())
+	pat := jira.PATAuthTransport{
+		Token: auth.Pass,
+	}
+	c := pat.Client()
+	c.Jar, err = cookiejar.New(&cookiejar.Options{
+		PublicSuffixList: publicsuffix.List,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return
 	}
-	res, err := j.Authentication.AcquireSessionCookie(auth.User, auth.Pass)
-	if err != nil || res == false {
+	j, err := jira.NewClient(c, jURL.String())
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return
 	}
@@ -107,40 +117,7 @@ func main() {
 
 	select {
 	case <-ui.exited:
-	case <-sig:
+	case <-ctx.Done():
 	}
 	debug("bye")
-}
-
-func wrap(t, prefix string) string {
-	raw := false
-	out := ""
-	t = strings.TrimSpace(strings.Replace(t, "\r\n", "\n", -1))
-	max := 100
-	lines := strings.Split(t, "\n")
-	for i, line := range lines {
-		if i > 0 {
-			out += "\n" + prefix
-		}
-		// try to handle code blocks nicely
-		if strings.HasPrefix(line, "{code") || strings.HasSuffix(line, "{code}\n") {
-			raw = !raw
-		}
-		if raw {
-			out += line
-			continue
-		}
-		s := line
-		for len(s) > max {
-			i := strings.LastIndex(s[:max], " ")
-			if i < 0 {
-				i = max - 1
-			}
-			out += s[:i] + "\n" + prefix
-			i++ // skip the space
-			s = s[i:]
-		}
-		out += s
-	}
-	return out
 }

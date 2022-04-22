@@ -1,43 +1,24 @@
+//go:build linux
 // +build linux
 
 package main
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
 	"strings"
-
-	ss "github.com/hdonnay/secretservice"
 )
 
-func secretsOS(name string) (string, string, error) {
-	srv, err := ss.DialService()
+func secretsOS(ctx context.Context, name string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "secret-tool", "lookup", "app_id", "io.github.hdonnay.Jira", "host", name)
+	out, err := cmd.Output()
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("secret %q not found: %w", name, err)
 	}
-	session, err := srv.OpenSession(ss.AlgoPlain)
-	if err != nil {
-		return "", "", err
+	u, p, ok := strings.Cut(string(out), ":")
+	if !ok {
+		return "", "", fmt.Errorf("secret %q not found: bad format", name)
 	}
-	defer session.Close()
-	for _, c := range srv.Collections() {
-		for _, i := range c.Items() {
-			if i.GetLabel() == name {
-				if i.Locked() {
-					// TODO: unlock
-					return "", "", err
-				}
-				s, err := i.GetSecret(session)
-				if err != nil {
-					return "", "", err
-				}
-				pass, err := s.GetValue(session)
-				if err != nil {
-					return "", "", err
-				}
-				upw := strings.SplitN(string(pass), ":", 2)
-				return upw[0], upw[1], nil
-			}
-		}
-	}
-	return "", "", fmt.Errorf("secret %q not found", name)
+	return u, p, nil
 }

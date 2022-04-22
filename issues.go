@@ -2,29 +2,73 @@ package main
 
 import (
 	"bytes"
+	"embed"
 	"fmt"
 	"io"
 	"log"
 	"net/url"
+	"path"
 	"sort"
+	"strconv"
 	"strings"
+	"text/template"
 	"time"
+	"unicode"
 
 	"github.com/andygrunwald/go-jira"
 )
 
 const (
-	issueTag  = ` Undo Get Put |fmt `
-	issueTmpl = `Summary: 
-Project: [%s]
-Type: [%s]
-Assignee: 
-Labels: 
-Components: 
-
-<Description goes here>
-`
+	issueTag = ` Undo Get Put |fmt `
 	pickLine = `/^%s: /+-`
+)
+
+var (
+	//go:embed templates
+	templates embed.FS
+
+	tmpls = template.Must(template.New("").Funcs(tmplFuncs).ParseFS(templates, "templates/*"))
+
+	tmplFuncs = map[string]any{
+		// See etc.go:/^func wrap
+		"wrap": wrap,
+		"join": strings.Join,
+		// Quote is actually "quote if contains space."
+		"quote": func(in string) (string, error) {
+			if strings.IndexFunc(in, unicode.IsSpace) == -1 {
+				return in, nil
+			}
+			return strconv.Quote(in), nil
+		},
+		// Issuelink prints the URL that a user would use, given an API URL for an issue.
+		"issuelink": func(i *jira.Issue) (string, error) {
+			u, err := url.Parse(i.Self)
+			if err != nil {
+				return "", err
+			}
+			u, err = u.Parse(path.Join("/browse", i.Key))
+			if err != nil {
+				return "", err
+			}
+			return u.String(), nil
+		},
+		// Sort sorts the string.
+		"sort": func(s []string) []string {
+			sort.Strings(s)
+			return s
+		},
+		"time": func(t jira.Time) string {
+			return time.Time(t).Local().Format(time.RFC1123)
+		},
+		// Some times aren't parsed by the jira package, so this is a dedicated function for it.
+		"jiratime": func(in string) (string, error) {
+			t, err := time.Parse(jiraDateFmt, in)
+			if err != nil {
+				return "", err
+			}
+			return t.Local().Format(time.RFC1123), nil
+		},
+	}
 )
 
 type headers struct {
@@ -112,39 +156,6 @@ func headersFromWindow(w *win) *headers {
 	return &h
 }
 
-func (h *headers) WriteTo(w io.Writer) {
-	// We don't write out the project, because that's encoded in the issue key.
-	fmt.Fprintf(w, "Summary: %s\n", h.Summary)
-	fmt.Fprintf(w, "Type: %s\n", h.Type)
-	fmt.Fprintf(w, "Status: ")
-	if strings.Contains(h.Status, " ") {
-		fmt.Fprintf(w, "%q\n", h.Status)
-	} else {
-		fmt.Fprintf(w, "%s\n", h.Status)
-	}
-	fmt.Fprintf(w, "Assignee: %s\n", h.Assignee)
-	fmt.Fprintf(w, "Components:")
-	for _, c := range h.Components {
-		if strings.Contains(c, " ") {
-			fmt.Fprintf(w, " %q", c)
-		} else {
-			fmt.Fprintf(w, " %s", c)
-		}
-	}
-	fmt.Fprintf(w, "\n")
-	fmt.Fprintf(w, "Labels:")
-	for _, l := range h.Labels {
-		if strings.Contains(l, " ") {
-			fmt.Fprintf(w, " %q", l)
-		} else {
-			fmt.Fprintf(w, " %s", l)
-		}
-	}
-	fmt.Fprintf(w, "\n")
-	fmt.Fprintf(w, "URL: %s\n", h.URL)
-	fmt.Fprintln(w)
-}
-
 func (w *win) diff() *issueUpdate {
 	u := issueUpdate{}
 	added := false
@@ -199,25 +210,30 @@ func (u *UI) issueTemplate() *win {
 	w.put = u.createIssue
 	w.Issue = true
 
+	var data struct {
+		Projects []string
+		Types    []string
+	}
 	u.projMu.Lock()
-	var proj []string
-	for _, p := range u.proj {
-		proj = append(proj, p.Key)
+	data.Projects = make([]string, len(u.proj))
+	for i := range u.proj {
+		data.Projects[i] = u.proj[i].Key
 	}
 	u.projMu.Unlock()
 
 	u.typesMu.Lock()
-	var types []string
-	for n := range u.types {
-		types = append(types, n)
+	data.Types = make([]string, 0, len(u.types))
+	for t := range u.types {
+		data.Types = append(data.Types, t)
 	}
 	u.typesMu.Unlock()
 
-	err := w.Fprintf("data", issueTmpl,
-		strings.Join(proj, "|"),
-		strings.Join(types, "|"),
-	)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := tmpls.ExecuteTemplate(&buf, "new", &data); err != nil {
+		u.err(err.Error())
+		return nil
+	}
+	if _, err := w.Write("data", buf.Bytes()); err != nil {
 		u.err(err.Error())
 		return nil
 	}
@@ -316,7 +332,8 @@ func (u *UI) createIssue(w *win) {
 
 func (u *UI) fetchIssue(w *win) {
 	id := w.Title
-	i, _, err := u.j.Issue.Get(id)
+	opts := jira.GetQueryOptions{}
+	i, _, err := u.j.Issue.Get(id, &opts)
 	if err != nil {
 		u.err(err.Error())
 		w.Del(true)
@@ -330,22 +347,13 @@ func (u *UI) fetchIssue(w *win) {
 		w.Del(true)
 		return
 	}
-	comment := &comments{}
-	if _, err := u.j.Do(req, comment); err != nil {
+
+	var buf bytes.Buffer
+	if err := tmpls.ExecuteTemplate(&buf, "issue", i); err != nil {
 		u.err(err.Error())
 		w.Del(true)
 		return
 	}
-
-	buf := &bytes.Buffer{}
-	w.headers.WriteTo(buf)
-	t, err := time.Parse(jiraDateFmt, i.Fields.Created)
-	if err != nil {
-		log.Println(err)
-	}
-	fmt.Fprintf(buf, "Reported by %s (%s)\n", i.Fields.Reporter.Name, t.Format(time.Stamp))
-	fmt.Fprintf(buf, "\n\t%s\n", wrap(i.Fields.Description, "\t"))
-	comment.format(buf)
 
 	// If the issue has changed state, re-write the possible actions.
 	if i.Fields.Status.Name != w.issueState {
@@ -434,22 +442,6 @@ func (u *UI) transitionIssue(w *win, id string) {
 	if res, err := u.j.Do(req, nil); err != nil {
 		debug("returned response: %#v\n", res)
 		u.err(fmt.Sprintf("error doing transition: %v\n", err))
-	}
-}
-
-type comments struct {
-	Comments []jira.Comment `json:"comments"`
-}
-
-func (cs *comments) format(w io.Writer) {
-	for _, c := range cs.Comments {
-		t, err := time.Parse(jiraDateFmt, c.Updated)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		fmt.Fprintf(w, "\nComment by %s (%s)\n", c.Author.Name, t.Format(time.Stamp))
-		fmt.Fprintf(w, "\n\t%s\n", wrap(c.Body, "\t"))
 	}
 }
 

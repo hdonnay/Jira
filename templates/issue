@@ -1,0 +1,6 @@
+{{template "headers" .Fields}}
+URL: {{issuelink .}}
+
+{{template "description" .Fields -}}
+
+{{template "comments" .Fields.Comments -}}

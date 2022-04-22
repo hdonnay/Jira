@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"log"
+	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // This is something like n^2 worst-case.
@@ -88,3 +91,47 @@ func eol(w *win, l int) {
 	w.Addr("#%d", q1)
 	w.Ctl("dot=addr")
 }
+
+var (
+	codestart = []byte("{code")
+	codeend   = []byte("{code}")
+)
+
+func wrap(t, prefix string) string {
+	raw := false
+	max := *wrapWidth
+	var out strings.Builder
+	s := bufio.NewScanner(strings.NewReader(strings.TrimSpace(t)))
+	for s.Scan() {
+		out.WriteString(prefix)
+		line := s.Bytes()
+		// try to handle code blocks nicely
+		if bytes.HasPrefix(line, codestart) || bytes.HasSuffix(line, codeend) {
+			raw = !raw
+		}
+		if !raw {
+			line = bytes.TrimSpace(line)
+			for len(line) > max {
+				i := bytes.LastIndexFunc(line[:max], unicode.IsSpace)
+				if i < 0 {
+					// Managed to construct a run of text longer than our wrap,
+					// so just grab the first space.
+					i = bytes.IndexFunc(line, unicode.IsSpace)
+					if i < 0 {
+						break
+					}
+				}
+				out.Write(line[:i])
+				out.WriteByte('\n')
+				out.WriteString(prefix)
+				_, sz := utf8.DecodeRune(line[i:])
+				line = line[i+sz:] // skip the space
+			}
+		}
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	return out.String()
+}
+
+var jqlSan = strings.NewReplacer("\n\t", " ", "\n", " ", "\t", " ")

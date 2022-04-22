@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"log"
 	"path"
 	"regexp"
@@ -13,7 +14,6 @@ import (
 
 const (
 	addrdelim = "/[ \t\\n<>()\\[\\]\"']/"
-	issueFmt  = "%s\t%s\t%s\n\t%s\n"
 	myIssues  = `assignee = currentUser() AND resolution = Unresolved order by updated desc`
 )
 
@@ -83,9 +83,11 @@ func (w *win) expand(e *acme.Event) {
 func (w *win) loop(ui *UI) {
 	defer ui.exit(w.Title)
 	for e := range w.EventChan() {
+		if e.C2 != 'I' && e.C2 != 'D' {
+			debug("event: %q %04b %q %q\n", e.C2, e.Flag, string(e.Text), string(e.Arg))
+		}
 		switch e.C2 {
 		case 'x', 'X': // button 2
-			debug("event: %q %q\n", e.C2, string(e.Text))
 			cmd := strings.TrimSpace(string(e.Text))
 			switch cmd {
 			case "Put":
@@ -107,6 +109,17 @@ func (w *win) loop(ui *UI) {
 					eol(w, 1)
 					continue
 				}
+			case "Search":
+				ui.look("search")
+				w := ui.show("search")
+				if len(e.Arg) != 0 {
+					w.Ctl("nomark")
+					w.Addr(`1`)
+					w.Fprintf("data", "Search %s\n", jqlSan.Replace(string(e.Arg)))
+					w.Ctl("mark")
+				}
+				w.Reload()
+				continue
 			}
 			if w.Issue {
 				if id, ok := w.tr[cmd]; ok {
@@ -116,20 +129,42 @@ func (w *win) loop(ui *UI) {
 					continue
 				}
 			}
+			arg0, argv, ok := strings.Cut(cmd, " ")
+			if !ok {
+				break
+			}
+			switch arg0 {
+			case "New":
+				//ui.issueTemplate(string(e.Arg))
+				ui.err("need to improve the issue template")
+				continue
+			case "Search":
+				ui.look("search")
+				w := ui.show("search")
+				w.Ctl("nomark")
+				w.Addr(`1`)
+				w.Fprintf("data", "Search %s %s\n", jqlSan.Replace(argv), jqlSan.Replace(string(e.Arg)))
+				w.Ctl("mark")
+				w.Reload()
+				continue
+			}
 			if strings.HasPrefix(cmd, "Search") {
 				ui.look("search")
 				w := ui.show("search")
 				if len(cmd) != 6 {
 					w.Ctl("nomark")
 					w.Addr(`1`)
-					w.Fprintf("data", cmd+"\n")
+					w.Fprintf("data", "%s", cmd)
+					if len(e.Arg) != 0 {
+						w.Fprintf("data", " %s", string(e.Arg))
+					}
+					w.Fprintf("data", "\n")
 					w.Ctl("mark")
 				}
 				w.Reload()
 				continue
 			}
 		case 'l', 'L': // button 3
-			debug("event: %x %q %q\n", e.Flag, e.C2, string(e.Text))
 			if ui.look(string(e.Text)) {
 				// we found it, or made it!
 				continue
@@ -308,7 +343,7 @@ func (u *UI) look(title string) bool {
 				return false
 			}
 			w.Ctl("cleartag")
-			w.Fprintf("tag", " Get New Search ")
+			w.Fprintf("tag", " Get New Filters Search ")
 			w.reload = u.fetchMine
 			w.reload(w)
 		}
@@ -336,6 +371,20 @@ func (u *UI) look(title string) bool {
 			w.reload = u.search
 		}
 		return true
+	case "Filters", "filters":
+		w := u.show("filters")
+		if w != nil {
+			return true
+		}
+		w = u.new("filters")
+		if w == nil {
+			return false
+		}
+		w.Ctl("cleartag")
+		w.Fprintf("tag", " Get Search ")
+		w.reload = u.fetchFilters
+		w.reload(w)
+		return true
 	}
 	if u.projRe.MatchString(title) {
 		if w := u.show(title); w == nil {
@@ -362,15 +411,33 @@ func (u *UI) fetchMine(w *win) {
 	}
 
 	w.Clear()
-	for _, i := range l {
-		w.Fprintf("data", issueFmt,
-			i.Key,
-			i.Fields.Type.Name,
-			i.Fields.Status.Name,
-			i.Fields.Summary,
-		)
+	var buf bytes.Buffer
+	if err := tmpls.ExecuteTemplate(&buf, "issues", l); err != nil {
+		u.err(err.Error())
+		return
 	}
 
+	w.Write("data", buf.Bytes())
+	w.Ctl("clean")
+	w.Addr("0")
+	w.Ctl("dot=addr")
+	w.Ctl("show")
+}
+
+func (u *UI) fetchFilters(w *win) {
+	fs, _, err := u.j.Filter.GetFavouriteList()
+	if err != nil {
+		u.err(err.Error())
+		return
+	}
+
+	w.Clear()
+	var buf bytes.Buffer
+	if err := tmpls.ExecuteTemplate(&buf, "filters", fs); err != nil {
+		u.err(err.Error())
+		return
+	}
+	w.Write("data", buf.Bytes())
 	w.Ctl("clean")
 	w.Addr("0")
 	w.Ctl("dot=addr")

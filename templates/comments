@@ -1,0 +1,5 @@
+{{range .Comments}}
+Comment by {{.Author.Name}} ({{jiratime .Updated}})
+
+{{wrap .Body "\t"}}
+{{- end -}}

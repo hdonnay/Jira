@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 )
 
 func (u *UI) search(w *win) {
@@ -24,20 +23,15 @@ func (u *UI) search(w *win) {
 		return
 	}
 
-	buf := &bytes.Buffer{}
-	fmt.Fprint(buf, "\n")
-	for _, i := range r {
-		fmt.Fprintf(buf, issueFmt,
-			i.Key,
-			i.Fields.Type.Name,
-			i.Fields.Status.Name,
-			i.Fields.Summary,
-		)
-
+	var buf bytes.Buffer
+	if err := tmpls.ExecuteTemplate(&buf, "issues", r); err != nil {
+		u.err(err.Error())
+		return
 	}
 
 	w.Ctl("nomark")
 	w.Addr("2,")
+	w.Fprintf("data", "\n")
 	w.Write("data", buf.Bytes())
 	w.Ctl("mark")
 	w.Ctl("clean")

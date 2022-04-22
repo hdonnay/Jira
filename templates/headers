@@ -1,0 +1,9 @@
+Summary: {{.Summary}}
+Type: {{.Type.Name}}
+Status: {{quote .Status.Name}}
+Assignee: {{with .Assignee}}{{.Name}}{{end}}
+Components:{{range .Components}} {{quote .Name -}}{{end}}
+Labels:{{range sort .Labels}} {{quote . -}}{{end}}
+FixVersion:{{range .FixVersions}} {{.Name -}}{{end}}
+{{- if ne 0 (len .AffectsVersions)}}
+AffectsVersion:{{range .AffectsVersions}} {{.Name -}}{{end}}{{end}}

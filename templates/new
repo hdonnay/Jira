@@ -1,0 +1,8 @@
+Summary:
+Project: [{{join .Projects}}]
+Type: [{{join .Types}}]
+Assignee:
+Labels:
+Components:
+
+<Description goes here>

@@ -1,0 +1,4 @@
+{{range . }}{{.Name}}:{{with .Description}} {{.}}{{end}}
+
+{{wrap .Jql "\t"}}
+{{end}}
