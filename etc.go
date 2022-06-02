@@ -84,6 +84,22 @@ func unquote(b []byte) []string {
 	return s
 }
 
+func quote(s string) string {
+	if strings.IndexFunc(s, unicode.IsSpace) == -1 {
+		return s
+	}
+	var b strings.Builder
+	b.WriteByte('\'')
+	for _, r := range s {
+		b.WriteRune(r)
+		if r == '\'' {
+			b.WriteByte('\'')
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
+}
+
 func eol(w *win, l int) {
 	w.Addr("%d", l)
 	_, q1, _ := w.ReadAddr()

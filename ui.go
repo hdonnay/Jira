@@ -3,17 +3,20 @@ package main
 import (
 	"bytes"
 	"log"
+	"net/url"
 	"path"
 	"regexp"
 	"strings"
 	"sync"
 
 	"9fans.net/go/acme"
+	"9fans.net/go/plan9/client"
+	"9fans.net/go/plumb"
 	jira "github.com/andygrunwald/go-jira"
 )
 
 const (
-	addrdelim = "/[ \t\\n<>()\\[\\]\"']/"
+	addrdelim = "/[! \t\\n<>()\\[\\]\"']/"
 	myIssues  = `assignee = currentUser() AND resolution = Unresolved order by updated desc`
 )
 
@@ -82,6 +85,7 @@ func (w *win) expand(e *acme.Event) {
 
 func (w *win) loop(ui *UI) {
 	defer ui.exit(w.Title)
+Event:
 	for e := range w.EventChan() {
 		if e.C2 != 'I' && e.C2 != 'D' {
 			debug("event: %q %04b %q %q\n", e.C2, e.Flag, string(e.Text), string(e.Arg))
@@ -178,9 +182,53 @@ func (w *win) loop(ui *UI) {
 			if ui.look(string(e.Text)) {
 				continue
 			}
+			if w.Issue {
+				// Check if this is an attachment link, transform it and send to the plumber.
+				i, _, err := ui.j.Issue.Get(w.Title, &jira.GetQueryOptions{
+					Fields: "attachment",
+				})
+				if err != nil {
+					ui.err(err.Error())
+					continue
+				}
+				name := getFilename(e.Text)
+				for _, a := range i.Fields.Attachments {
+					if a.Filename != name {
+						continue
+					}
+					debug("found %q: id %s", string(e.Text), a.ID)
+					base := ui.j.GetBaseURL()
+					rel, err := url.Parse(path.Join("secure", "attachment", a.ID))
+					if err != nil {
+						ui.err(err.Error())
+						continue
+					}
+					rel.Path = strings.TrimLeft(rel.Path, "/")
+					tgt := base.ResolveReference(rel).String() + "/"
+					debug("plumbing %q", tgt)
+					if ui.plumb == nil {
+						continue
+					}
+					m := plumb.Message{
+						Src:  "Jira",
+						Type: "text",
+						Data: []byte(tgt),
+					}
+					if err := m.Send(ui.plumb); err != nil {
+						ui.err(err.Error())
+					}
+					continue Event
+				}
+			}
 		}
 		w.WriteEvent(e)
 	}
+}
+
+func getFilename(b []byte) string {
+	b = bytes.TrimLeft(b, "^")
+	b, _, _ = bytes.Cut(b, []byte("|"))
+	return string(b)
 }
 
 func (w *win) comment() string {
@@ -219,6 +267,8 @@ type UI struct {
 	proj   jira.ProjectList
 	projMu *sync.Mutex
 	projRe *regexp.Regexp
+
+	plumb *client.Fid
 }
 
 func (u *UI) err(s string) {
@@ -247,6 +297,12 @@ func New(prefix string, j *jira.Client) (*UI, error) {
 		types:  make(map[string]*jira.IssueType),
 		win:    make(map[string]*win),
 		exited: make(chan struct{}),
+	}
+	pc, err := plumb.Open("send", 1) // WRONLY
+	if err != nil {
+		log.Printf("unable to open connection to plumber: %v", err)
+	} else {
+		u.plumb = pc
 	}
 	u.updateCaches()
 	return u, nil
@@ -362,7 +418,7 @@ func (u *UI) look(title string) bool {
 				return false
 			}
 			w.Ctl("cleartag")
-			w.Fprintf("tag", " Clear ")
+			w.Fprintf("tag", " Get Clear ")
 			w.Fprintf("data", "Search %s\n", myIssues)
 			eol(w, 1)
 			w.Ctl("mark")

@@ -9,11 +9,9 @@ import (
 	"net/url"
 	"path"
 	"sort"
-	"strconv"
 	"strings"
 	"text/template"
 	"time"
-	"unicode"
 
 	"github.com/andygrunwald/go-jira"
 )
@@ -34,12 +32,7 @@ var (
 		"wrap": wrap,
 		"join": strings.Join,
 		// Quote is actually "quote if contains space."
-		"quote": func(in string) (string, error) {
-			if strings.IndexFunc(in, unicode.IsSpace) == -1 {
-				return in, nil
-			}
-			return strconv.Quote(in), nil
-		},
+		"quote": quote,
 		// Issuelink prints the URL that a user would use, given an API URL for an issue.
 		"issuelink": func(i *jira.Issue) (string, error) {
 			u, err := url.Parse(i.Self)

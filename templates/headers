@@ -7,3 +7,5 @@ Labels:{{range sort .Labels}} {{quote . -}}{{end}}
 FixVersion:{{range .FixVersions}} {{.Name -}}{{end}}
 {{- if ne 0 (len .AffectsVersions)}}
 AffectsVersion:{{range .AffectsVersions}} {{.Name -}}{{end}}{{end}}
+{{- if ne 0 (len .Attachments)}}
+Attachments:{{range .Attachments}} [^{{.Filename}}]{{end}}{{end}}
